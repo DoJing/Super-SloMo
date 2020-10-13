@@ -2,7 +2,7 @@
 Converts a Video to SuperSloMo version
 """
 from time import time
-import click
+#import click
 import cv2
 import torch
 from PIL import Image
@@ -104,12 +104,30 @@ def load_batch(video_in, batch_size, batch, w, h):
     return batch
 
 
+def read_batch(images_name,batch_size, batch, w, h,frame_id):
+    if len(batch) > 0:
+        batch = [batch[-1]]
+
+    for i in range(batch_size):
+        if(frame_id >= len(images_name)):
+            break
+        frame = cv2.imread(images_name[frame_id])
+        frame_id += 1
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame = Image.fromarray(frame)
+        frame = frame.resize((w, h), Image.ANTIALIAS)
+        frame = frame.convert('RGB')
+        frame = trans_forward(frame)
+        batch.append(frame)
+    return batch, frame_id
+
 def denorm_frame(frame, w0, h0):
     frame = frame.cpu()
     frame = trans_backward(frame)
     frame = frame.resize((w0, h0), Image.BILINEAR)
     frame = frame.convert('RGB')
-    return np.array(frame)[:, :, ::-1].copy()
+    frame = np.array(frame)[:, :, ::-1].copy()
+    return frame
 
 
 def convert_video(source, dest, factor, batch_size=10, output_format='mp4v', output_fps=30):
@@ -121,6 +139,7 @@ def convert_video(source, dest, factor, batch_size=10, output_format='mp4v', out
     vout = cv2.VideoWriter(dest, codec, float(output_fps), (w0, h0))
 
     w, h = (w0 // 32) * 32, (h0 // 32) * 32
+
     setup_back_warp(w, h)
 
     done = 0
@@ -138,7 +157,8 @@ def convert_video(source, dest, factor, batch_size=10, output_format='mp4v', out
             vout.write(denorm_frame(batch[fid], w0, h0))
             for frm in iframe:
                 vout.write(denorm_frame(frm, w0, h0))
-
+                cv2.imshow('frame', denorm_frame(frm, w0, h0))
+                cv2.waitKey(0)
         try:
             yield len(batch), done, count
         except StopIteration:
@@ -150,19 +170,72 @@ def convert_video(source, dest, factor, batch_size=10, output_format='mp4v', out
     vout.release()
 
 
-@click.command('Evaluate Model by converting a low-FPS video to high-fps')
-@click.argument('input')
-@click.option('--checkpoint', help='Path to model checkpoint')
-@click.option('--output', help='Path to output file to save')
-@click.option('--batch', default=2, help='Number of frames to process in single forward pass')
-@click.option('--scale', default=4, help='Scale Factor of FPS')
-@click.option('--fps', default=30, help='FPS of output video')
+def convert_imgs(imgs_name,factor,batch_size=4):
+    count = len(imgs_name)
+    done = 0
+    img0=cv2.imread(imgs_name[0])
+    w0 = img0.shape[1]
+    h0 = img0.shape[0]
+    while(min(w0,h0)>512):
+        w0 = int(w0*0.8)
+        h0 = int(h0*0.8)
+
+    w, h = (w0 // 32) * 32, (h0 // 32) * 32
+
+    setup_back_warp(w, h)
+    frame_id = 0
+    batch = []
+    while True:
+        batch, frame_id = read_batch(imgs_name, batch_size, batch, w, h, frame_id)
+        if len(batch) == 1:
+            break
+        done += len(batch) - 1
+        intermediate_frames = interpolate_batch(batch, factor)
+        intermediate_frames = list(zip(*intermediate_frames))
+
+        for fid, iframe in enumerate(intermediate_frames):
+            cv2.imshow('frame', denorm_frame(batch[fid], w0, h0))
+            cv2.waitKey()
+            for frm in iframe:
+                cv2.imshow('frame', denorm_frame(frm, w0, h0))
+                cv2.waitKey()
+        if frame_id >= len(imgs_name):
+            break
+        try:
+            yield len(batch), done, count
+        except StopIteration:
+            break
+# @click.command('Evaluate Model by converting a low-FPS video to high-fps')
+# @click.argument('input')
+# @click.option('--checkpoint', help='Path to model checkpoint')
+# @click.option('--output', help='Path to output file to save')
+# @click.option('--batch', default=2, help='Number of frames to process in single forward pass')
+# @click.option('--scale', default=4, help='Scale Factor of FPS')
+# @click.option('--fps', default=30, help='FPS of output video')
+
+invideo = '/home/dojing/视频/webwxgetvideo.mp4'
+checkpoint = './SuperSloMo.ckpt'
+output = 'data/out.mp4'
+batch = 2
+scale = 10
+
+fps = 30
+img0_name = './data/img4.jpg'
+img1_name = './data/img3.jpg'
+imgs_name = [img0_name,img1_name,img0_name,img1_name,img0_name,img1_name,img0_name,img1_name,img0_name,img1_name]
 def main(input, checkpoint, output, batch, scale, fps):
     avg = lambda x, n, x0: (x * n/(n+1) + x0 / (n+1), n+1)
     load_models(checkpoint)
     t0 = time()
     n0 = 0
     fpx = 0
+    for dl, fd, fc in convert_imgs(imgs_name,scale,batch_size=batch):
+        fpx, n0 = avg(fpx, n0, dl / (time() - t0))
+        prg = int(100 * fd / fc)
+        eta = (fc - fd) / fpx
+        print('\rDone: {:03d}% FPS: {:05.2f} ETA: {:.2f}s'.format(prg, fpx, eta) + ' ' * 5, end='')
+        t0 = time()
+    return
     for dl, fd, fc in convert_video(input, output, int(scale), int(batch), output_fps=int(fps)):
         fpx, n0 = avg(fpx, n0, dl / (time() - t0))
         prg = int(100*fd/fc)
@@ -170,8 +243,7 @@ def main(input, checkpoint, output, batch, scale, fps):
         print('\rDone: {:03d}% FPS: {:05.2f} ETA: {:.2f}s'.format(prg, fpx, eta) + ' '*5, end='')
         t0 = time()
 
-
 if __name__ == '__main__':
-    main()
-
+    main(invideo, checkpoint, output, batch, scale, fps)
+    #convert_imgs(imgs_name,scale,batch_size=4)
 
